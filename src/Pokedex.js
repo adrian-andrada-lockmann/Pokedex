@@ -1,278 +1,456 @@
-function actualizarTextoAyuda(texto) {
-    const $ayuda = document.querySelector("#ayuda");
-    $ayuda.textContent = texto;
+const API_BASE = "https://pokeapi.co/api/v2";
+const PAGE_SIZE = 20;
+const MAX_TEAM_SIZE = 6;
+const FAVORITES_KEY = "retro-dex-favorites";
+const TEAM_KEY = "retro-dex-team";
 
-    if (texto === "LOADING POKEMON") {
-        ocultarDetallesPokemon();
-    } else {
-        mostrarDetallesPokemon();
-    }
-}
+const state = {
+    page: 1,
+    total: 0,
+    currentPokemon: null,
+    currentList: [],
+    currentType: "",
+    favorites: readStorage(FAVORITES_KEY),
+    team: readStorage(TEAM_KEY),
+    compare: { a: null, b: null },
+    pokemonCache: new Map(),
+};
 
-function ocultarDetallesPokemon() {
-    const elementsToHide = [
-        document.querySelector("#pokemon-nombre"),
-        document.querySelector("#pokemon-id"),
-        document.querySelector("#pokemon-imagen"),
-        document.querySelector("#tipos-contenedor"),
-        document.querySelector("#habilidades-contenedor"),
-        document.querySelector('#moves'),
-    ];
+const elements = {};
 
-    elementsToHide.forEach((element) => {
-        if (element) {
-            element.style.display = "none";
-        }
-    });
-}
-
-function mostrarDetallesPokemon() {
-    const elementsToShow = [
-        document.querySelector("#pokemon-nombre"),
-        document.querySelector("#pokemon-id"),
-        document.querySelector("#pokemon-imagen"),
-        document.querySelector("#tipos-contenedor"),
-        document.querySelector("#habilidades-contenedor"),
-        document.querySelector('#moves'),
-    ];
-
-    elementsToShow.forEach((element) => {
-        if (element) {
-            element.style.display = "block";
-        }
-    });
-}
-
-function mostrarTipos(tipos) {
-    const $tipos = document.querySelector("#tipos");
-    $tipos.innerHTML = "";
-
-    tipos.forEach((tipo) => {
-        const $tipo = document.createElement("span")
-        $tipo.className = `badge ${tipo}`
-        $tipo.textContent = tipo.toUpperCase()
-        $tipos.appendChild($tipo)
-    });
-}
-
-function mostrarHabilidades(habilidades) {
-    const $habilidades = document.querySelector("#habilidades");
-    $habilidades.innerHTML = "";
-
-    habilidades.forEach((habilidad) => {
-        const $habilidad = document.createElement("span")
-        $habilidad.className = "badge white";
-        $habilidad.textContent = habilidad.toUpperCase();
-        $habilidades.appendChild($habilidad)
-    });
-}
-
-function mostrarMovimientos(movimientos) {
-    const $movimientos = document.querySelector("#movimientos");
-
-    $movimientos.innerHTML = "";
-    movimientos.forEach((movimiento) => {
-
-        const { movimiento: nombreMovimiento, versiones } = movimiento;
-        const $movimientoFila = document.createElement("tr");
-        const $movimiento = document.createElement("th");
-        $movimiento.setAttribute("scope", "row");
-        $movimiento.className = "badge white";
-        $movimiento.textContent = nombreMovimiento.toUpperCase();
-        $movimientoFila.appendChild($movimiento);
-
-        const $versiones = document.createElement("td");
-
-        versiones.forEach((version) => {
-            const $version = document.createElement("span");
-            $version.className = "badge white";
-            $version.textContent = version.toUpperCase();
-            $versiones.appendChild($version);
-        });
-
-        $movimientoFila.appendChild($versiones);
-        $movimientos.appendChild($movimientoFila);
-    });
-}
-
-function mostrarPokemon(pokemon) {
-    const { id, name: nombre, sprites: { front_default: fotoPrincipal }, types: tipos, abilities: habilidades, moves: movimientos } = pokemon;
-    actualizarTextoAyuda();
-
-    const $imagen = document.querySelector("#pokemon-imagen");
-    $imagen.setAttribute("src", fotoPrincipal);
-    $imagen.setAttribute("alt", `Imagen de pokemon ${nombre}`);
-    document.querySelector("#pokemon-nombre").textContent = nombre.toUpperCase();
-    document.querySelector("#pokemon-id").textContent = `#${id}`;
-
-    mostrarTipos(tipos.map((item) => item.type.name));
-    mostrarHabilidades(habilidades.map((item) => item.ability.name));
-    mostrarMovimientos(movimientos.map((item) => ({
-        movimiento: item.move.name,
-        versiones: item.version_group_details.map((v) => v.version_group.name)
-    })));
-}
-
-function obtenerParametrosdeURL(url) {
-    let offset;
-    let limit;
+function readStorage(key) {
     try {
-        offset = /offset=([0-9]+)/gi.exec(url).pop();
-        limit = /limit=([0-9]+)/gi.exec(url).pop();
-    } catch (e) {
-        offset = undefined;
-        limit = undefined;
+        return JSON.parse(localStorage.getItem(key)) || [];
+    } catch (error) {
+        return [];
     }
-    return { offset, limit };
 }
 
-function cargarPokemon(nombre) {
-    actualizarTextoAyuda("LOADING POKEMON");
+function writeStorage(key, value) {
+    localStorage.setItem(key, JSON.stringify(value));
+}
 
-    fetch(`https://pokeapi.co/api/v2/pokemon/${nombre}`)
-        .then((r) => r.json())
-        .then((pokemon) => {
-            mostrarPokemon(pokemon);
-            actualizarTextoAyuda(""); 
-        })
-        .catch((error) => {
-            actualizarTextoAyuda("ERROR LOADING POKEMON");
-            console.error("Error al cargar el Pokémon:", error);
+function normalizeName(value) {
+    return String(value).toLowerCase().trim().replace(/\s+/g, "-");
+}
+
+function formatName(value) {
+    return String(value)
+        .replace(/-/g, " ")
+        .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function debounce(callback, wait = 350) {
+    let timeoutId;
+    return (...args) => {
+        window.clearTimeout(timeoutId);
+        timeoutId = window.setTimeout(() => callback(...args), wait);
+    };
+}
+
+function setStatus(message) {
+    elements.help.textContent = message;
+}
+
+function setLoading(isLoading) {
+    document.body.classList.toggle("is-loading", isLoading);
+}
+
+async function fetchJson(url) {
+    const response = await fetch(url);
+    if (!response.ok) {
+        throw new Error(`Request failed: ${response.status}`);
+    }
+    return response.json();
+}
+
+async function getPokemon(nameOrId) {
+    const key = normalizeName(nameOrId);
+    if (state.pokemonCache.has(key)) {
+        return state.pokemonCache.get(key);
+    }
+
+    const pokemon = await fetchJson(`${API_BASE}/pokemon/${key}`);
+    state.pokemonCache.set(key, pokemon);
+    state.pokemonCache.set(String(pokemon.id), pokemon);
+    state.pokemonCache.set(pokemon.name, pokemon);
+    return pokemon;
+}
+
+async function loadPokemon(nameOrId) {
+    try {
+        setLoading(true);
+        setStatus("Scanning target...");
+        const pokemon = await getPokemon(nameOrId);
+        state.currentPokemon = pokemon;
+        renderPokemon(pokemon);
+        renderPokemonList();
+        setStatus("Target locked");
+    } catch (error) {
+        console.error(error);
+        setStatus("Target not found");
+    } finally {
+        setLoading(false);
+    }
+}
+
+async function loadPage(page) {
+    try {
+        setLoading(true);
+        state.currentType = "";
+        elements.typeFilter.value = "";
+        state.page = Math.max(1, page);
+        const offset = (state.page - 1) * PAGE_SIZE;
+        const data = await fetchJson(`${API_BASE}/pokemon?offset=${offset}&limit=${PAGE_SIZE}`);
+        state.total = data.count;
+        state.currentList = data.results.map((pokemon) => ({
+            name: pokemon.name,
+            id: getIdFromPokemonUrl(pokemon.url),
+        }));
+        renderPokemonList();
+        renderPageControls();
+        renderTotal();
+    } catch (error) {
+        console.error(error);
+        elements.index.innerHTML = '<p class="terminal-note">Index connection failed.</p>';
+    } finally {
+        setLoading(false);
+    }
+}
+
+async function loadType(type) {
+    if (!type) {
+        loadPage(1);
+        return;
+    }
+
+    try {
+        setLoading(true);
+        state.currentType = type;
+        const data = await fetchJson(`${API_BASE}/type/${type}`);
+        state.currentList = data.pokemon
+            .map(({ pokemon }) => ({
+                name: pokemon.name,
+                id: getIdFromPokemonUrl(pokemon.url),
+            }))
+            .filter((pokemon) => pokemon.id && pokemon.id <= 1025)
+            .sort((a, b) => a.id - b.id);
+        renderPokemonList();
+        renderPageControls();
+        renderTotal();
+    } catch (error) {
+        console.error(error);
+        elements.index.innerHTML = '<p class="terminal-note">Type filter unavailable.</p>';
+    } finally {
+        setLoading(false);
+    }
+}
+
+async function loadTypes() {
+    const data = await fetchJson(`${API_BASE}/type`);
+    data.results
+        .filter((type) => !["unknown", "shadow"].includes(type.name))
+        .forEach((type) => {
+            const option = document.createElement("option");
+            option.value = type.name;
+            option.textContent = formatName(type.name);
+            elements.typeFilter.appendChild(option);
         });
 }
 
-function cargarPokemones(offset = 0, limit = 20) {
-    return fetch(`https://pokeapi.co/api/v2/pokemon/?offset=${offset}&limit=${limit}`).then((r) => r.json());
+function getIdFromPokemonUrl(url) {
+    const match = /\/pokemon\/(\d+)\//.exec(url);
+    return match ? Number(match[1]) : null;
 }
 
-function mostrarTotalPokemones(totalPokemones) {
-    document.querySelector("#total-pokemones").textContent = totalPokemones;
+function getArtwork(pokemon) {
+    return pokemon.sprites.other["official-artwork"].front_default
+        || pokemon.sprites.other.dream_world.front_default
+        || pokemon.sprites.front_default;
 }
 
-function actualizarTextoIndicePokemones(texto) {
-    const $indice = document.querySelector("#indice");
-    $indice.textContent = texto;
+function renderTotal() {
+    if (state.currentType) {
+        elements.total.textContent = `${state.currentList.length} ${state.currentType.toUpperCase()} TARGETS`;
+    } else {
+        elements.total.textContent = `${state.total || "----"} POKEAPI TARGETS`;
+    }
 }
 
-function mostrarListadoPokemones(pokemones) {
-    const $indice = document.querySelector("#indice");
-    $indice.innerHTML = "";
-    pokemones.forEach((pokemon) => {
-        const { name: nombre } = pokemon;
-        const $link = document.createElement("a");
-        $link.className = "list-group-item list-group-item-action";
-        $link.setAttribute("href", "#");
-        $link.textContent = `${nombre.toUpperCase()}`;
-        $link.addEventListener("click", () => {
-            actualizarTextoAyuda("LOADING POKEMON");
-            cargarPokemon(nombre);
-        });
-        $indice.appendChild($link);
+function renderPageControls() {
+    const totalPages = Math.ceil(state.total / PAGE_SIZE);
+    elements.pageLabel.textContent = state.currentType ? "TYPE" : String(state.page).padStart(2, "0");
+    elements.prevPage.disabled = state.currentType || state.page <= 1;
+    elements.nextPage.disabled = state.currentType || state.page >= totalPages;
+}
+
+function renderPokemonList() {
+    elements.index.innerHTML = "";
+
+    if (!state.currentList.length) {
+        elements.index.innerHTML = '<p class="terminal-note">No targets in this channel.</p>';
+        return;
+    }
+
+    state.currentList.forEach((pokemon) => {
+        const button = document.createElement("button");
+        const isActive = state.currentPokemon?.name === pokemon.name;
+        const isFavorite = state.favorites.includes(pokemon.name);
+        button.className = `pokemon-row${isActive ? " is-active" : ""}`;
+        button.type = "button";
+        button.innerHTML = `
+            <span>#${String(pokemon.id || "???").padStart(3, "0")}</span>
+            <strong>${formatName(pokemon.name)}</strong>
+            <em>${isFavorite ? "★" : " "}</em>
+        `;
+        button.addEventListener("click", () => loadPokemon(pokemon.name));
+        elements.index.appendChild(button);
     });
 }
 
-function crearItemPaginador(texto, url = "#") {
-    const $item = document.createElement("li");
-    const $link = document.createElement("a");
-    $item.className = "page-item";
-    $link.className = "page-link";
-    $link.textContent = texto;
-    $link.href = url;
-    $link.dataset.pagina = texto;
-    $item.appendChild($link);
-    return $item;
+function renderPokemon(pokemon) {
+    elements.image.src = getArtwork(pokemon);
+    elements.image.alt = `${formatName(pokemon.name)} artwork`;
+    elements.name.textContent = formatName(pokemon.name);
+    elements.id.textContent = `#${String(pokemon.id).padStart(3, "0")}`;
+    elements.selectedCode.textContent = `PKMN-${String(pokemon.id).padStart(4, "0")}`;
+    document.documentElement.style.setProperty("--type-accent", getTypeColor(pokemon.types[0].type.name));
+
+    renderChips(elements.types, pokemon.types.map(({ type }) => type.name), "type-chip");
+    renderChips(elements.abilities, pokemon.abilities.map(({ ability }) => ability.name), "ability-chip");
+    renderStats(pokemon.stats);
+    renderMoves(pokemon.moves);
+    renderFavoriteButton();
 }
 
-function manejarCambioPagina(e) {
-    e.preventDefault();
-    const { target } = e;
-    const href = target.getAttribute("href");
-    let numeroPagina;
-    const { pagina } = target.dataset;
-    if (href === "#") {
-        numeroPagina = Number(pagina);
-        cambiarPagina(numeroPagina);
-    } else {
-        cambiarPagina(href);
-    }
+function renderChips(container, items, className) {
+    container.innerHTML = "";
+    items.forEach((item) => {
+        const chip = document.createElement("span");
+        chip.className = `${className} ${item}`;
+        chip.textContent = formatName(item);
+        container.appendChild(chip);
+    });
 }
 
-function mostrarPaginador(totalPokemones, paginaActual, urlAnterior, urlSiguiente) {
-    const POKEMONES_POR_PAGINA = 20;
-    const MAX_PAGINAS_VISIBLES = 8; // Máximo número de páginas visibles en el paginador
-    const $paginador = document.querySelector("#paginador");
-    $paginador.innerHTML = "";
+function renderStats(stats) {
+    elements.stats.innerHTML = "";
+    stats.forEach((stat) => {
+        const value = stat.base_stat;
+        const row = document.createElement("div");
+        row.className = "stat-row";
+        row.innerHTML = `
+            <span>${stat.stat.name.replace("special-", "sp. ").toUpperCase()}</span>
+            <div class="stat-track"><i style="width: ${Math.min(value, 160) / 160 * 100}%"></i></div>
+            <strong>${value}</strong>
+        `;
+        elements.stats.appendChild(row);
+    });
+}
 
-    const totalPaginas = Math.ceil(totalPokemones / POKEMONES_POR_PAGINA);
+function renderMoves(moves) {
+    const visibleMoves = moves.slice(0, 28);
+    elements.movesCount.textContent = `${moves.length} MOVES`;
+    elements.moves.innerHTML = "";
 
-    // Cálculo del rango de páginas a mostrar
-    let inicioPagina = Math.max(1, paginaActual - Math.floor(MAX_PAGINAS_VISIBLES / 2));
-    let finPagina = Math.min(totalPaginas, inicioPagina + MAX_PAGINAS_VISIBLES - 1);
+    visibleMoves.forEach((move) => {
+        const item = document.createElement("div");
+        item.className = "move-row";
+        item.innerHTML = `
+            <strong>${formatName(move.move.name)}</strong>
+            <span>${move.version_group_details.length} versions</span>
+        `;
+        elements.moves.appendChild(item);
+    });
+}
 
-    // Ajuste si estamos al inicio o final del conjunto de páginas
-    if (finPagina - inicioPagina < MAX_PAGINAS_VISIBLES - 1) {
-        inicioPagina = Math.max(1, finPagina - MAX_PAGINAS_VISIBLES + 1);
+function renderFavoriteButton() {
+    if (!state.currentPokemon) return;
+    const isFavorite = state.favorites.includes(state.currentPokemon.name);
+    elements.favoriteToggle.textContent = isFavorite ? "★" : "☆";
+    elements.favoriteToggle.classList.toggle("is-active", isFavorite);
+}
+
+function renderTeam() {
+    elements.teamTray.innerHTML = "";
+    elements.teamCount.textContent = `${state.team.length}/${MAX_TEAM_SIZE}`;
+
+    Array.from({ length: MAX_TEAM_SIZE }).forEach((_, index) => {
+        const pokemon = state.team[index];
+        const slot = document.createElement("button");
+        slot.className = `team-slot${pokemon ? " is-filled" : ""}`;
+        slot.type = "button";
+        slot.textContent = pokemon ? formatName(pokemon.name) : "EMPTY";
+        slot.title = pokemon ? "Remove from team" : "Empty team slot";
+        slot.addEventListener("click", () => {
+            if (!pokemon) return;
+            state.team = state.team.filter((item) => item.name !== pokemon.name);
+            writeStorage(TEAM_KEY, state.team);
+            renderTeam();
+        });
+        elements.teamTray.appendChild(slot);
+    });
+}
+
+function renderCompare() {
+    const { a, b } = state.compare;
+    if (!a && !b) {
+        elements.comparePanel.innerHTML = '<p class="terminal-note">Set two targets to compare base stats.</p>';
+        return;
     }
 
-    const $paginaAnterior = crearItemPaginador("<<<", urlAnterior);
+    const totalA = a ? getStatTotal(a) : 0;
+    const totalB = b ? getStatTotal(b) : 0;
+    elements.comparePanel.innerHTML = `
+        <div class="compare-row">
+            <span>A</span>
+            <strong>${a ? formatName(a.name) : "EMPTY"}</strong>
+            <em>${a ? totalA : "--"}</em>
+        </div>
+        <div class="compare-row">
+            <span>B</span>
+            <strong>${b ? formatName(b.name) : "EMPTY"}</strong>
+            <em>${b ? totalB : "--"}</em>
+        </div>
+        <p class="compare-result">${getCompareResult(a, b, totalA, totalB)}</p>
+    `;
+}
 
-    if (urlAnterior) {
-        $paginaAnterior.classList.remove("disabled");
+function getStatTotal(pokemon) {
+    return pokemon.stats.reduce((total, stat) => total + stat.base_stat, 0);
+}
+
+function getCompareResult(a, b, totalA, totalB) {
+    if (!a || !b) return "Awaiting second target.";
+    if (totalA === totalB) return "Equal base total.";
+    return totalA > totalB ? "Slot A has higher base total." : "Slot B has higher base total.";
+}
+
+function toggleFavorite() {
+    if (!state.currentPokemon) return;
+
+    const name = state.currentPokemon.name;
+    if (state.favorites.includes(name)) {
+        state.favorites = state.favorites.filter((favorite) => favorite !== name);
     } else {
-        $paginaAnterior.classList.add("disabled");
+        state.favorites.push(name);
     }
-    $paginador.appendChild($paginaAnterior);
 
-    // Añadir páginas del rango calculado
-    for (let i = inicioPagina; i <= finPagina; i += 1) {
-        const $pagina = crearItemPaginador(i, `?offset=${(i - 1) * POKEMONES_POR_PAGINA}&limit=${POKEMONES_POR_PAGINA}`);
-        if (i === paginaActual) {
-            $pagina.classList.add("active");
+    writeStorage(FAVORITES_KEY, state.favorites);
+    renderFavoriteButton();
+    renderPokemonList();
+}
+
+function addSelectedToTeam() {
+    if (!state.currentPokemon) return;
+
+    const pokemon = {
+        id: state.currentPokemon.id,
+        name: state.currentPokemon.name,
+    };
+
+    const alreadyInTeam = state.team.some((item) => item.name === pokemon.name);
+    if (alreadyInTeam) {
+        setStatus("Target already in team");
+        return;
+    }
+
+    if (state.team.length >= MAX_TEAM_SIZE) {
+        setStatus("Team tray is full");
+        return;
+    }
+
+    state.team.push(pokemon);
+    writeStorage(TEAM_KEY, state.team);
+    renderTeam();
+    setStatus("Target added to team");
+}
+
+function setCompareSlot(slot) {
+    if (!state.currentPokemon) return;
+    state.compare[slot] = state.currentPokemon;
+    renderCompare();
+}
+
+function getTypeColor(type) {
+    const colors = {
+        normal: "#a8a77a",
+        fire: "#ee8130",
+        water: "#6390f0",
+        electric: "#f7d02c",
+        grass: "#7ac74c",
+        ice: "#96d9d6",
+        fighting: "#c22e28",
+        poison: "#a33ea1",
+        ground: "#e2bf65",
+        flying: "#a98ff3",
+        psychic: "#f95587",
+        bug: "#a6b91a",
+        rock: "#b6a136",
+        ghost: "#735797",
+        dragon: "#6f35fc",
+        dark: "#705746",
+        steel: "#b7b7ce",
+        fairy: "#d685ad",
+    };
+    return colors[type] || "#8be870";
+}
+
+function bindEvents() {
+    elements.prevPage.addEventListener("click", () => loadPage(state.page - 1));
+    elements.nextPage.addEventListener("click", () => loadPage(state.page + 1));
+    elements.typeFilter.addEventListener("change", (event) => loadType(event.target.value));
+    elements.favoriteToggle.addEventListener("click", toggleFavorite);
+    elements.addTeam.addEventListener("click", addSelectedToTeam);
+    elements.compareA.addEventListener("click", () => setCompareSlot("a"));
+    elements.compareB.addEventListener("click", () => setCompareSlot("b"));
+    elements.searchInput.addEventListener("input", debounce((event) => {
+        const value = normalizeName(event.target.value);
+        if (!value) {
+            setStatus("Target locked");
+            return;
         }
-        $paginador.appendChild($pagina);
-    }
-
-    const $paginaSiguiente = crearItemPaginador(">>>", urlSiguiente);
-
-    if (urlSiguiente) {
-        $paginaSiguiente.addEventListener("click", () => cambiarPagina(paginaActual + 1));
-        $paginaSiguiente.classList.remove("disabled");
-    } else {
-        $paginaSiguiente.classList.add("disabled");
-    }
-    $paginador.appendChild($paginaSiguiente);
-
-    $paginador.addEventListener("click", manejarCambioPagina);
+        loadPokemon(value);
+    }));
 }
 
-function cambiarPagina(pagina) {
-    const POKEMONES_POR_PAGINA = 20;
-    let paginaActual;
-    let offset;
-    let limit = POKEMONES_POR_PAGINA;
-
-    if (typeof pagina === "number") {
-        offset = POKEMONES_POR_PAGINA * (pagina - 1);
-        paginaActual = pagina;
-    } else {
-        const parametros = obtenerParametrosdeURL(pagina);
-        offset = parametros.offset;
-        limit = parametros.limit;
-        paginaActual = Math.ceil(parametros.offset / parametros.limit) + 1;
-    }
-    actualizarTextoIndicePokemones("LOADING...");
-
-    return cargarPokemones(offset, limit).then((respuesta) => {
-        const {
-            count: totalPokemones, results: pokemones, next: urlSiguiente, previous: urlAnterior,
-        } = respuesta;
-        mostrarTotalPokemones(totalPokemones);
-        mostrarListadoPokemones(pokemones);
-        mostrarPaginador(totalPokemones, paginaActual, urlAnterior, urlSiguiente);
-    });
+function cacheElements() {
+    elements.total = document.querySelector("#total-pokemones");
+    elements.pageLabel = document.querySelector("#page-label");
+    elements.searchInput = document.querySelector("#search-input");
+    elements.typeFilter = document.querySelector("#type-filter");
+    elements.prevPage = document.querySelector("#prev-page");
+    elements.nextPage = document.querySelector("#next-page");
+    elements.index = document.querySelector("#indice");
+    elements.help = document.querySelector("#ayuda");
+    elements.favoriteToggle = document.querySelector("#favorite-toggle");
+    elements.image = document.querySelector("#pokemon-imagen");
+    elements.id = document.querySelector("#pokemon-id");
+    elements.name = document.querySelector("#pokemon-nombre");
+    elements.types = document.querySelector("#tipos");
+    elements.abilities = document.querySelector("#habilidades");
+    elements.stats = document.querySelector("#stats");
+    elements.selectedCode = document.querySelector("#selected-code");
+    elements.teamCount = document.querySelector("#team-count");
+    elements.teamTray = document.querySelector("#team-tray");
+    elements.addTeam = document.querySelector("#add-team");
+    elements.compareA = document.querySelector("#compare-a");
+    elements.compareB = document.querySelector("#compare-b");
+    elements.comparePanel = document.querySelector("#compare-panel");
+    elements.moves = document.querySelector("#movimientos");
+    elements.movesCount = document.querySelector("#moves-count");
 }
 
-document.addEventListener("DOMContentLoaded", () => {
-    cambiarPagina(1);
-    cargarPokemon("bulbasaur");
+document.addEventListener("DOMContentLoaded", async () => {
+    cacheElements();
+    bindEvents();
+    renderTeam();
+    renderCompare();
+
+    try {
+        await Promise.all([loadTypes(), loadPage(1), loadPokemon("bulbasaur")]);
+    } catch (error) {
+        console.error(error);
+        setStatus("Terminal boot failed");
+    }
 });
